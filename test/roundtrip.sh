@@ -27,7 +27,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() {
+  echo "FAIL: $*" >&2
+  [ -s "$WORK/josh.log" ] && { echo "--- josh.log:" >&2; cat "$WORK/josh.log" >&2; }
+  exit 1
+}
 
 wait_port() { # host:port must accept within ~10s
   for _ in $(seq 1 100); do
@@ -60,7 +64,10 @@ stop_proxy() { # must exit within 2s of termination and leave no orphans
 
 echo "== setup: local upstream served over smart HTTP"
 mkdir -p "$WORK/srv"
-git init -q --bare "$WORK/srv/upstream.git"
+# -b pins the bare repo's HEAD: a default-branch mismatch leaves HEAD
+# dangling, ls-remote --symref returns nothing, and josh falls back to
+# refs/heads/master — filtering an empty branch into an empty "successful" clone.
+git init -q --bare -b "$BASE_BRANCH" "$WORK/srv/upstream.git"
 git -C "$WORK/srv/upstream.git" config http.receivepack true
 git init -q -b "$BASE_BRANCH" "$WORK/seed"
 git -C "$WORK/seed" config user.email t@t && git -C "$WORK/seed" config user.name t
