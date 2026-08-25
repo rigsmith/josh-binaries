@@ -34,11 +34,15 @@ jobs:
           - { target: linux-x64,   os: ubuntu-latest,    experimental: false }
           - { target: linux-arm64, os: ubuntu-24.04-arm, experimental: false }
           - { target: macos-arm64, os: macos-latest,     experimental: false }
+          - { target: macos-x64,   os: macos-15-intel,   experimental: false } # last x86_64 macOS runner
           # The frontier: upstream has no Windows CI at all. Never blocks a
           # release; a green run here is news worth posting to josh#2235.
+          # continue-on-error sits on the individual steps, NOT the job: a
+          # failed job with job-level continue-on-error renders a green check
+          # (actions/runner#2347), hiding exactly the signal this leg exists
+          # to produce. The verdict step below states the real outcomes.
           - { target: windows-x64, os: windows-latest,   experimental: true }
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
     defaults:
       run:
         shell: bash
@@ -47,6 +51,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build josh-proxy
+        id: proxy
+        continue-on-error: ${{ matrix.experimental }}
         run: >
           cargo install --locked
           --git "https://github.com/${{ inputs.source }}"
@@ -54,6 +60,7 @@ jobs:
           --root out josh-proxy
 
       - name: Build josh-cli (canary for josh#2235 on windows)
+        id: cli
         continue-on-error: ${{ matrix.experimental }}
         run: >
           cargo install --locked
@@ -62,10 +69,15 @@ jobs:
           --root out josh-cli
 
       - name: Round-trip suite
+        id: roundtrip
+        if: steps.proxy.outcome == 'success'
+        continue-on-error: ${{ matrix.experimental }}
         run: bash test/roundtrip.sh out/bin/josh-proxy*
 
       - name: Path-forms regression (josh#2288)
-        if: runner.os == 'Windows'
+        id: pathforms
+        if: runner.os == 'Windows' && steps.roundtrip.outcome == 'success'
+        continue-on-error: true
         run: |
           set -euo pipefail
           bash test/roundtrip.sh out/bin/josh-proxy.exe "./josh-rel"
@@ -74,7 +86,9 @@ jobs:
           bash test/roundtrip.sh out/bin/josh-proxy.exe "X:/josh-subst"
           cmd //c "subst X: /d"
 
+      # Only a binary that passed the round-trip ships.
       - name: Stage artifacts
+        if: steps.roundtrip.outcome == 'success'
         run: |
           set -euo pipefail
           mkdir dist
@@ -88,13 +102,94 @@ jobs:
           ls -l dist
 
       - uses: actions/upload-artifact@v4
+        if: steps.roundtrip.outcome == 'success'
         with:
           name: ${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
-  release:
+      # The loud, unmasked verdict for the experimental leg. Read outcomes
+      # (pre-continue-on-error), never conclusions — conclusions lie here.
+      - name: Windows verdict
+        if: always() && matrix.experimental
+        run: |
+          {
+            if [ "${{ steps.proxy.outcome }}" != "success" ]; then
+              echo "❌ ${{ matrix.target }}: josh-proxy did not compile (unix-only code, e.g. josh-rpc/tokio_fd.rs at r26.07.19)"
+            elif [ "${{ steps.roundtrip.outcome }}" != "success" ]; then
+              echo "⚠️ ${{ matrix.target }}: josh-proxy compiled but FAILED the round-trip — not shipped"
+            else
+              echo "✅ ${{ matrix.target }}: josh-proxy compiled and round-tripped"
+              if [ "${{ steps.pathforms.outcome }}" = "success" ]; then
+                echo "✅ ${{ matrix.target }}: path-forms regression (josh#2288) passed"
+              else
+                echo "⚠️ ${{ matrix.target }}: path-forms regression (josh#2288) FAILED"
+              fi
+            fi
+            if [ "${{ steps.cli.outcome }}" = "success" ]; then
+              echo "✅ ${{ matrix.target }}: josh-cli canary compiled — josh#2235 news"
+            else
+              echo "· ${{ matrix.target }}: josh-cli canary still red (josh#2235)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.proxy.outcome }}" = "success" ] && [ "${{ steps.roundtrip.outcome }}" != "success" ]; then
+            echo "::warning title=${{ matrix.target }} compiled but failed the round-trip::Not shipped. See the Round-trip suite step log."
+          fi
+
+  # Prove the shipped file, not the one warm in the build directory: download
+  # each artifact exactly as a consumer would and rerun the suite against it.
+  validate:
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64,   os: ubuntu-latest,    experimental: false }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, experimental: false }
+          - { target: macos-arm64, os: macos-latest,     experimental: false }
+          - { target: macos-x64,   os: macos-15-intel,   experimental: false }
+          - { target: windows-x64, os: windows-latest,   experimental: true }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # The windows artifact legitimately may not exist (its build or
+      # round-trip failed); that must stay visible without failing the run.
+      - name: Download artifact
+        id: download
+        continue-on-error: ${{ matrix.experimental }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist
+
+      - name: Round-trip the shipped binary
+        id: shipped
+        if: steps.download.outcome == 'success'
+        continue-on-error: ${{ matrix.experimental }}
+        run: |
+          set -euo pipefail
+          bin="$(ls dist/josh-proxy-*)"
+          chmod +x "$bin" # upload-artifact drops the exec bit
+          bash test/roundtrip.sh "$bin"
+
+      - name: Verdict
+        if: always() && matrix.experimental
+        run: |
+          if [ "${{ steps.download.outcome }}" != "success" ]; then
+            echo "· ${{ matrix.target }}: no artifact to validate (nothing shipped)" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.shipped.outcome }}" = "success" ]; then
+            echo "✅ ${{ matrix.target }}: shipped artifact round-tripped" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Shipped ${{ matrix.target }} artifact failed validation::See the Round-trip step log."
+            echo "⚠️ ${{ matrix.target }}: shipped artifact FAILED the round-trip" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  release:
+    needs: [build, validate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -123,4 +218,4 @@ jobs:
           gh release create "${{ inputs.tag }}" dist/* \
             --repo "${{ github.repository }}" \
             --title "${{ inputs.tag }}" \
-            --notes "Built from \`${{ inputs.source }}\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`), unmodified. Each binary passed the functional round-trip suite on its platform (see the run for this release); windows-x64 is experimental and may be absent. Verify: \`gh attestation verify <file> --repo ${{ github.repository }}\` and \`sha256sum -c SHA256SUMS\`."
+            --notes "Built from \`${{ inputs.source }}\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`), unmodified. Each binary passed the functional round-trip suite on its platform — once at build and again as a re-downloaded artifact (see the run for this release); windows-x64 is experimental and may be absent. Verify: \`gh attestation verify <file> --repo ${{ github.repository }}\` and \`sha256sum -c SHA256SUMS\`."

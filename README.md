@@ -21,13 +21,17 @@ not the bar; "round-trips history correctly on this OS" is.
 | linux-x64 | built + tested | built |
 | linux-arm64 | built + tested | built |
 | macos-arm64 | built + tested | built |
+| macos-x64 | built + tested | built |
 | windows-x64 | experimental — the frontier | blocked upstream ([josh#2235](https://github.com/josh-project/josh/issues/2235)) |
 
 Upstream has [no Windows infrastructure at all](https://github.com/josh-project/josh/issues/2235#issuecomment)
 (maintainer, July 2026), so the Windows column here is the only tested signal
-that exists anywhere. Windows legs run `continue-on-error`: a red leg never
-blocks a release, and the josh-cli step doubles as a canary that flips green
-the day josh#2235 is fixed. Patched builds can be produced from the
+that exists anywhere. Windows legs run `continue-on-error` on their individual
+steps (job-level would render a failed leg as a green check —
+[actions/runner#2347](https://github.com/actions/runner/issues/2347)): a red
+leg never blocks a release, the job summary states the real per-step verdict,
+and the josh-cli step doubles as a canary that flips green the day josh#2235
+is fixed. Patched builds can be produced from the
 [rigsmith/josh](https://github.com/rigsmith/josh) fork via the build workflow's
 `source` input.
 
@@ -38,7 +42,9 @@ the day josh#2235 is fixed. Patched builds can be produced from the
 2. `build.yml` builds each matrix leg with `cargo install --locked` from the
    exact tag, runs the round-trip suite against the built binary, and uploads
    artifacts.
-3. The release job publishes a GitHub Release named after the upstream tag:
+3. A `validate` job re-downloads each artifact as a consumer would and reruns
+   the suite against the shipped file (exec bit restored) on its own platform.
+4. The release job publishes a GitHub Release named after the upstream tag:
    `josh-proxy-<tag>-<target>[.exe]`, a `SHA256SUMS` file, and GitHub
    build-provenance attestations (`gh attestation verify <file> --repo rigsmith/josh-binaries`).
 
