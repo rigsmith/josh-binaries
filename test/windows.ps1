@@ -73,22 +73,42 @@ if ($PathForms) {
   $tmp = $env:TEMP
   Run-Suite 'paths: relative' @((To-BashPath $suite), (To-BashPath $proxy), './josh-rel')
   Run-Suite 'paths: spaces'   @((To-BashPath $suite), (To-BashPath $proxy), (To-BashPath "$tmp\josh cache spaces"))
-  # Go through cmd: PowerShell mangles the bare "X:" argument, and subst then
-  # reports "Invalid parameter - X:". Pick a drive letter that is actually free.
-  $letter = 68..90 | ForEach-Object { [char]$_ } |
-            Where-Object { -not (Test-Path "${_}:") } | Select-Object -First 1
-  if (-not $letter) {
-    Write-Warning "no free drive letter — skipping the subst-drive case"
+  # A junction: a reparse point in the path, no privileges needed (unlike
+  # symlinks). Covers the "path resolves through something" case even where
+  # subst is unavailable.
+  $junction = Join-Path $tmp 'josh-junction'
+  $jtarget = Join-Path $tmp 'josh-junction-target'
+  New-Item -ItemType Directory -Force -Path $jtarget | Out-Null
+  if (-not (Test-Path $junction)) { cmd /c "mklink /J `"$junction`" `"$jtarget`"" | Out-Null }
+  if (Test-Path $junction) {
+    Run-Suite 'paths: junction' @((To-BashPath $suite), (To-BashPath $proxy), (To-BashPath (Join-Path $junction 'cache')))
   } else {
-    cmd /c "subst ${letter}: `"$tmp`"" | Out-Null
-    if (-not (Test-Path "${letter}:")) {
-      Write-Warning "subst ${letter}: failed — skipping the subst-drive case"
-    } else {
-      try {
-        Run-Suite "paths: subst drive (${letter}:)" @((To-BashPath $suite), (To-BashPath $proxy), "/$($letter.ToString().ToLower())/josh-subst")
-      } finally {
-        cmd /c "subst ${letter}: /d" | Out-Null
-      }
+    Write-Warning "could not create a junction — skipping that case"
+  }
+
+  # Go through cmd: PowerShell mangles the bare "X:" argument, and subst then
+  # reports "Invalid parameter - X:". Test-Path alone is not enough to pick a
+  # letter — an assigned-but-not-ready device (an empty optical drive) reports
+  # False yet subst still refuses it — so try candidates until one takes.
+  # subst mappings are per-logon-session, so an elevated shell's drives are not
+  # visible to normal processes (and some policies disable subst outright); the
+  # case is skipped, with the reason, rather than failing the run.
+  $mapped = $null
+  $substErr = ''
+  foreach ($c in 'Z','Y','X','W','V','U','T','S') {
+    if (Test-Path "${c}:") { continue }
+    $substErr = (cmd /c "subst ${c}: `"$tmp`" 2>&1") -join ' '
+    if (Test-Path "${c}:") { $mapped = $c; break }
+  }
+  if (-not $mapped) {
+    Write-Warning "subst unavailable ($substErr) — skipping the mapped-drive case"
+  } else {
+    try {
+      Run-Suite "paths: subst drive (${mapped}:)" @(
+        (To-BashPath $suite), (To-BashPath $proxy),
+        "/$($mapped.ToLower())/josh-subst")
+    } finally {
+      cmd /c "subst ${mapped}: /d" | Out-Null
     }
   }
 }
