@@ -72,7 +72,12 @@ git -C "$WORK/seed" add . && git -C "$WORK/seed" commit -qm "c2: lib"
 C2="$(git -C "$WORK/seed" rev-parse HEAD)"
 git -C "$WORK/seed" push -q "$WORK/srv/upstream.git" "$BASE_BRANCH"
 
-go run "$SCRIPT_DIR/githttp/main.go" -root "$WORK/srv" -port "$GIT_PORT" &
+# Build first, run the binary: `go run` compiles the (uncached) stdlib on a
+# fresh runner, which can outlast any readiness budget; a blocking build makes
+# the wait below measure only the bind.
+GITHTTP="$WORK/githttp$(go env GOEXE)"
+go build -o "$GITHTTP" "$SCRIPT_DIR/githttp/main.go" || fail "building githttp helper"
+"$GITHTTP" -root "$WORK/srv" -port "$GIT_PORT" &
 GIT_SRV_PID=$!
 wait_port "$GIT_PORT" || fail "git http server never became ready"
 

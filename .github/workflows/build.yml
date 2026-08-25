@@ -49,6 +49,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
 
       - name: Build josh-proxy
         id: proxy
@@ -155,6 +158,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
 
       # The windows artifact legitimately may not exist (its build or
       # round-trip failed); that must stay visible without failing the run.
