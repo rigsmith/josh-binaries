@@ -7,33 +7,43 @@ repo exists so tools that shell out to josh — [rig](https://github.com/rigsmit
 `stack` verb in particular — can download a pinned, checksummed, provenance-attested
 engine on any platform in seconds instead of requiring a Rust toolchain.
 
-Every release is gated on a functional round-trip suite run on each platform:
-proxy boot/teardown, filtered clone (`:prefix`), pinned-SHA fetch (`@sha`),
-reverse-filter push (the history round-trip everything depends on), warm-cache
-reuse, and — on Windows — the path-form regression cases for
-[josh#2288](https://github.com/josh-project/josh/issues/2288). "Compiled" is
+Every release is gated on functional suites run on each platform. The proxy
+suite (`test/roundtrip.sh`) covers boot/teardown, filtered clone (`:prefix`),
+pinned-SHA fetch (`@sha`), reverse-filter push (the history round-trip
+everything depends on), and warm-cache reuse across a proxy restart. The CLI
+suite (`test/cli.sh`) covers `josh-filter`, `josh clone` (into a relative
+directory — the [josh#2288](https://github.com/josh-project/josh/issues/2288)
+trigger shape), `josh pull`, and `josh push --base` with an exact-parent
+assertion. On Windows the proxy suite additionally reruns against relative,
+space-laden and subst-drive cache paths. "Compiled" is
 not the bar; "round-trips history correctly on this OS" is.
 
 ## Platforms
 
 | target | josh-proxy | josh-cli |
 |---|---|---|
-| linux-x64 | built + tested | built |
-| linux-arm64 | built + tested | built |
-| macos-arm64 | built + tested | built |
-| macos-x64 | built + tested | built |
-| windows-x64 | experimental — the frontier | blocked upstream ([josh#2235](https://github.com/josh-project/josh/issues/2235)) |
+| linux-x64 | built + tested | built + tested |
+| linux-arm64 | built + tested | built + tested |
+| macos-arm64 | built + tested | built + tested |
+| macos-x64 | built + tested | built + tested |
+| windows-x64 | built + tested (patched builds) | built + tested (patched builds) |
 
-Upstream has [no Windows infrastructure at all](https://github.com/josh-project/josh/issues/2235#issuecomment)
-(maintainer, July 2026), so the Windows column here is the only tested signal
-that exists anywhere. Windows legs run `continue-on-error` on their individual
-steps (job-level would render a failed leg as a green check —
-[actions/runner#2347](https://github.com/actions/runner/issues/2347)): a red
-leg never blocks a release, the job summary states the real per-step verdict,
-and the josh-cli step doubles as a canary that flips green the day josh#2235
-is fixed. Patched builds can be produced from the
-[rigsmith/josh](https://github.com/rigsmith/josh) fork via the build workflow's
-`source` input.
+**Windows works — from the patched builds only.** Upstream josh does not compile
+on Windows at `r26.07.19` ([josh#2235](https://github.com/josh-project/josh/issues/2235);
+the maintainers note they have no infrastructure to test the platform), so
+releases built from unmodified upstream carry no Windows assets. Releases
+tagged `<tag>-win.N` are built from the
+[rigsmith/josh](https://github.com/rigsmith/josh) fork's Windows port branch,
+and their Windows binaries pass both suites plus the path-forms regression for
+[josh#2288](https://github.com/josh-project/josh/issues/2288) — which the port
+also fixes. The port is validated on x86-64 in CI and on ARM64 by hand; the
+intent is to upstream it, after which plain tags build everywhere and the
+`-win.N` line retires.
+
+Windows legs run `continue-on-error` on their individual steps (job-level would
+render a failed leg as a green check —
+[actions/runner#2347](https://github.com/actions/runner/issues/2347)): a red leg
+never blocks a release, and the job summary states the real per-step verdict.
 
 ## How releases happen
 
