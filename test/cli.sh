@@ -74,14 +74,22 @@ mkdir -p "$WORK/cli" && cd "$WORK/cli"
 [ "$(git -C "$WORK/cli/cli-clone" rev-list --count HEAD)" = "2" ] \
   || fail "josh clone: filtered history should have 2 commits"
 
-echo "== josh pull after upstream advances"
+# `pull` moved under `changes` after r26.07.19; support both spellings so the
+# suite can test a pinned release and current master with one script.
+if "$JOSH" changes pull --help >/dev/null 2>&1; then
+  PULL=(changes pull)
+else
+  PULL=(pull)
+fi
+
+echo "== josh ${PULL[*]} after upstream advances"
 echo "more" >> "$WORK/seed/src/lib.txt"
 git -C "$WORK/seed" commit -qam "c3: more lib"
 C3="$(git -C "$WORK/seed" rev-parse HEAD)"
 git -C "$WORK/seed" push -q "$WORK/srv/upstream.git" "$BASE_BRANCH"
-(cd "$WORK/cli/cli-clone" && "$JOSH" pull) || fail "josh pull"
+(cd "$WORK/cli/cli-clone" && "$JOSH" "${PULL[@]}") || fail "josh ${PULL[*]}"
 grep -q "more" "$WORK/cli/cli-clone/lib/src/lib.txt" \
-  || fail "josh pull: upstream change did not arrive through the filter"
+  || fail "josh ${PULL[*]}: upstream change did not arrive through the filter"
 
 echo "== josh push (reverse filtering, in-process)"
 cd "$WORK/cli/cli-clone"
