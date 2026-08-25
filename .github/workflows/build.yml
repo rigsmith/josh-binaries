@@ -25,6 +25,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # x86-64 Windows: aws-lc-sys needs NASM; the crate ships prebuilt NASM
+  # objects behind this switch, so runners need no extra install. No effect on
+  # other targets.
+  AWS_LC_SYS_PREBUILT_NASM: 1
+
 jobs:
   build:
     strategy:
