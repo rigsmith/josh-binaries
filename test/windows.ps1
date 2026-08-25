@@ -73,9 +73,24 @@ if ($PathForms) {
   $tmp = $env:TEMP
   Run-Suite 'paths: relative' @((To-BashPath $suite), (To-BashPath $proxy), './josh-rel')
   Run-Suite 'paths: spaces'   @((To-BashPath $suite), (To-BashPath $proxy), (To-BashPath "$tmp\josh cache spaces"))
-  subst X: $tmp 2>$null
-  try   { Run-Suite 'paths: subst drive' @((To-BashPath $suite), (To-BashPath $proxy), '/x/josh-subst') }
-  finally { subst X: /d 2>$null }
+  # Go through cmd: PowerShell mangles the bare "X:" argument, and subst then
+  # reports "Invalid parameter - X:". Pick a drive letter that is actually free.
+  $letter = 68..90 | ForEach-Object { [char]$_ } |
+            Where-Object { -not (Test-Path "${_}:") } | Select-Object -First 1
+  if (-not $letter) {
+    Write-Warning "no free drive letter — skipping the subst-drive case"
+  } else {
+    cmd /c "subst ${letter}: `"$tmp`"" | Out-Null
+    if (-not (Test-Path "${letter}:")) {
+      Write-Warning "subst ${letter}: failed — skipping the subst-drive case"
+    } else {
+      try {
+        Run-Suite "paths: subst drive (${letter}:)" @((To-BashPath $suite), (To-BashPath $proxy), "/$($letter.ToString().ToLower())/josh-subst")
+      } finally {
+        cmd /c "subst ${letter}: /d" | Out-Null
+      }
+    }
+  }
 }
 
 Write-Host "`n=== verdict" -ForegroundColor Cyan
