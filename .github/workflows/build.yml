@@ -83,6 +83,12 @@ jobs:
         continue-on-error: ${{ matrix.experimental }}
         run: bash test/roundtrip.sh out/bin/josh-proxy*
 
+      - name: CLI suite
+        id: clisuite
+        if: steps.cli.outcome == 'success'
+        continue-on-error: ${{ matrix.experimental }}
+        run: bash test/cli.sh out/bin
+
       - name: Path-forms regression (josh#2288)
         id: pathforms
         if: runner.os == 'Windows' && steps.roundtrip.outcome == 'success'
@@ -104,7 +110,7 @@ jobs:
           ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
           cp "out/bin/josh-proxy$ext" "dist/josh-proxy-${{ inputs.tag }}-${{ matrix.target }}$ext"
           for b in josh josh-filter; do
-            if [ -f "out/bin/$b$ext" ]; then
+            if [ -f "out/bin/$b$ext" ] && [ "${{ steps.clisuite.outcome }}" = "success" ]; then
               cp "out/bin/$b$ext" "dist/$b-${{ inputs.tag }}-${{ matrix.target }}$ext"
             fi
           done
@@ -137,6 +143,11 @@ jobs:
             fi
             if [ "${{ steps.cli.outcome }}" = "success" ]; then
               echo "✅ ${{ matrix.target }}: josh-cli canary compiled — josh#2235 news"
+              if [ "${{ steps.clisuite.outcome }}" = "success" ]; then
+                echo "✅ ${{ matrix.target }}: cli suite passed"
+              else
+                echo "⚠️ ${{ matrix.target }}: cli suite FAILED — cli binaries not shipped"
+              fi
             else
               echo "· ${{ matrix.target }}: josh-cli canary still red (josh#2235)"
             fi
