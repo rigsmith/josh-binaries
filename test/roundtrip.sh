@@ -6,7 +6,7 @@
 # The optional second argument overrides josh's --local cache directory — the
 # Windows job passes relative / space-laden / subst-drive forms through here to
 # regression-test the josh#2288 path-mangling class (the bug bites on cache
-# *reuse*, which is why every run does a warm second fetch).
+# *reuse*, which is why the warm fetch happens across a proxy restart).
 #
 # Requires: git, go, curl on PATH. Everything runs against 127.0.0.1.
 set -euo pipefail
@@ -17,6 +17,7 @@ LOCAL_DIR="${2:-$WORK/josh-local}"
 GIT_PORT="${GIT_PORT:-42180}"
 JOSH_PORT="${JOSH_PORT:-42190}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_BRANCH="main" # the branch the seed repo below creates; -o base= derives from it
 
 GIT_SRV_PID=""
 JOSH_PID=""
@@ -38,11 +39,30 @@ wait_port() { # host:port must accept within ~10s
   return 1
 }
 
+start_proxy() {
+  "$JOSH_PROXY" --local "$LOCAL_DIR" --remote "http://127.0.0.1:$GIT_PORT" \
+    "--port=$JOSH_PORT" --no-background >>"$WORK/josh.log" 2>&1 &
+  JOSH_PID=$!
+  wait_port "$JOSH_PORT" || { cat "$WORK/josh.log" >&2; fail "josh-proxy never became ready"; }
+}
+
+stop_proxy() { # must exit within 2s of termination and leave no orphans
+  kill "$JOSH_PID" 2>/dev/null || true
+  for _ in $(seq 1 20); do kill -0 "$JOSH_PID" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "$JOSH_PID" 2>/dev/null; then fail "josh-proxy did not exit within 2s of termination"; fi
+  JOSH_PID=""
+  # Name-agnostic orphan check (validate runs a renamed binary): nothing may
+  # still be accepting on the proxy port once the process is gone.
+  if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$JOSH_PORT/"; then
+    fail "something still listening on the josh port after shutdown (orphan process?)"
+  fi
+}
+
 echo "== setup: local upstream served over smart HTTP"
 mkdir -p "$WORK/srv"
 git init -q --bare "$WORK/srv/upstream.git"
 git -C "$WORK/srv/upstream.git" config http.receivepack true
-git init -q -b main "$WORK/seed"
+git init -q -b "$BASE_BRANCH" "$WORK/seed"
 git -C "$WORK/seed" config user.email t@t && git -C "$WORK/seed" config user.name t
 echo "hello" > "$WORK/seed/README.md"
 git -C "$WORK/seed" add . && git -C "$WORK/seed" commit -qm "c1: readme"
@@ -50,17 +70,14 @@ C1="$(git -C "$WORK/seed" rev-parse HEAD)"
 mkdir -p "$WORK/seed/src" && echo "lib" > "$WORK/seed/src/lib.txt"
 git -C "$WORK/seed" add . && git -C "$WORK/seed" commit -qm "c2: lib"
 C2="$(git -C "$WORK/seed" rev-parse HEAD)"
-git -C "$WORK/seed" push -q "$WORK/srv/upstream.git" main
+git -C "$WORK/seed" push -q "$WORK/srv/upstream.git" "$BASE_BRANCH"
 
 go run "$SCRIPT_DIR/githttp/main.go" -root "$WORK/srv" -port "$GIT_PORT" &
 GIT_SRV_PID=$!
 wait_port "$GIT_PORT" || fail "git http server never became ready"
 
 echo "== boot: josh-proxy --local '$LOCAL_DIR'"
-"$JOSH_PROXY" --local "$LOCAL_DIR" --remote "http://127.0.0.1:$GIT_PORT" \
-  "--port=$JOSH_PORT" --no-background >"$WORK/josh.log" 2>&1 &
-JOSH_PID=$!
-wait_port "$JOSH_PORT" || { cat "$WORK/josh.log" >&2; fail "josh-proxy never became ready"; }
+start_proxy
 
 FILTERED_URL="http://127.0.0.1:$JOSH_PORT/upstream.git:prefix=lib.git"
 
@@ -70,7 +87,10 @@ git clone -q "$FILTERED_URL" "$WORK/clone"
 [ "$(git -C "$WORK/clone" rev-list --count HEAD)" = "2" ] || fail "filtered history should have 2 commits"
 
 echo "== pinned-SHA fetch (@sha)"
-git -C "$WORK/clone" fetch -q "http://127.0.0.1:$JOSH_PORT/upstream.git@$C1:prefix=lib.git" HEAD
+# %3A form: consumers hit both the raw ':' filter separator (the clone above)
+# and the URL-encoded one; on Windows the encoded segment is a josh#2288 watch
+# point, so cover it here.
+git -C "$WORK/clone" fetch -q "http://127.0.0.1:$JOSH_PORT/upstream.git@$C1%3Aprefix=lib.git" HEAD
 git -C "$WORK/clone" ls-tree --name-only -r FETCH_HEAD | grep -qx "lib/README.md" \
   || fail "pinned fetch missing lib/README.md"
 git -C "$WORK/clone" ls-tree --name-only -r FETCH_HEAD | grep -q "lib/src" \
@@ -80,7 +100,10 @@ echo "== reverse push (the round-trip)"
 git -C "$WORK/clone" config user.email t@t && git -C "$WORK/clone" config user.name t
 echo "change" >> "$WORK/clone/lib/src/lib.txt"
 git -C "$WORK/clone" commit -qam "c3: change via filtered view"
-git -C "$WORK/clone" push -q origin HEAD:refs/heads/roundtrip
+# josh refuses to create a ref that doesn't exist on the remote unless the
+# push names a base to root it on. A fresh PR branch is the normal case for
+# consumers (rig's `stack send`), so exercise exactly that spelling.
+git -C "$WORK/clone" push -q -o "base=refs/heads/$BASE_BRANCH" origin HEAD:refs/heads/roundtrip
 RT="$(git -C "$WORK/srv/upstream.git" rev-parse refs/heads/roundtrip)" \
   || fail "roundtrip branch missing on upstream"
 git -C "$WORK/srv/upstream.git" show "$RT:src/lib.txt" | grep -q "change" \
@@ -90,13 +113,16 @@ git -C "$WORK/srv/upstream.git" show "$RT:src/lib.txt" | grep -q "change" \
 git -C "$WORK/srv/upstream.git" log -1 --format=%s "$RT" | grep -q "c3: change" \
   || fail "commit message lost in reverse filtering"
 
-echo "== warm-cache reuse (second fetch)"
-git -C "$WORK/clone" fetch -q origin || fail "warm fetch failed (cache reuse — the josh#2288 bite point)"
+echo "== clean shutdown, then warm-cache reuse across a restart"
+# Consumers run one proxy per operation, never a daemon — the --local cache
+# must survive a clean stop and serve the next proxy instance. A same-process
+# refetch can't catch corruption-on-shutdown; a restart does. This is also
+# where the josh#2288 path mangling bites.
+stop_proxy
+start_proxy
+git -C "$WORK/clone" fetch -q origin || fail "warm fetch after proxy restart failed (cache reuse)"
 
 echo "== teardown"
-kill "$JOSH_PID" 2>/dev/null || true
-for _ in $(seq 1 20); do kill -0 "$JOSH_PID" 2>/dev/null || break; sleep 0.1; done
-kill -0 "$JOSH_PID" 2>/dev/null && fail "josh-proxy did not exit within 2s of termination"
-JOSH_PID=""
+stop_proxy
 
 echo "PASS: round-trip suite (local cache: $LOCAL_DIR)"
