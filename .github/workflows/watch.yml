@@ -1,0 +1,35 @@
+name: watch upstream
+
+# Daily: diff upstream's r* tags against our releases; dispatch a build for
+# anything new (newest three only, so enabling this on a fresh repo doesn't
+# try to backfill years of history).
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Dispatch builds for unreleased upstream tags
+        run: |
+          set -euo pipefail
+          upstream=$(gh api repos/josh-project/josh/git/matching-refs/tags/r \
+            --jq '.[].ref' | sed 's|refs/tags/||' | sort -V | tail -3)
+          have=$(gh release list --repo "${{ github.repository }}" \
+            --json tagName --jq '.[].tagName' || true)
+          for t in $upstream; do
+            if echo "$have" | grep -qx "$t"; then
+              echo "already released: $t"
+            else
+              echo "dispatching build for $t"
+              gh workflow run build.yml --repo "${{ github.repository }}" -f tag="$t"
+            fi
+          done

@@ -1,0 +1,126 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "josh tag to build (e.g. r26.07.19)"
+        required: true
+        type: string
+      source:
+        description: "source repo (upstream, or rigsmith/josh for patched builds)"
+        required: false
+        default: "josh-project/josh"
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      source:
+        required: false
+        default: "josh-project/josh"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64,   os: ubuntu-latest,    experimental: false }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, experimental: false }
+          - { target: macos-arm64, os: macos-latest,     experimental: false }
+          # The frontier: upstream has no Windows CI at all. Never blocks a
+          # release; a green run here is news worth posting to josh#2235.
+          - { target: windows-x64, os: windows-latest,   experimental: true }
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build josh-proxy
+        run: >
+          cargo install --locked
+          --git "https://github.com/${{ inputs.source }}"
+          --tag "${{ inputs.tag }}"
+          --root out josh-proxy
+
+      - name: Build josh-cli (canary for josh#2235 on windows)
+        continue-on-error: ${{ matrix.experimental }}
+        run: >
+          cargo install --locked
+          --git "https://github.com/${{ inputs.source }}"
+          --tag "${{ inputs.tag }}"
+          --root out josh-cli
+
+      - name: Round-trip suite
+        run: bash test/roundtrip.sh out/bin/josh-proxy*
+
+      - name: Path-forms regression (josh#2288)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          bash test/roundtrip.sh out/bin/josh-proxy.exe "./josh-rel"
+          bash test/roundtrip.sh out/bin/josh-proxy.exe "$RUNNER_TEMP/josh cache spaces"
+          cmd //c "subst X: %RUNNER_TEMP%"
+          bash test/roundtrip.sh out/bin/josh-proxy.exe "X:/josh-subst"
+          cmd //c "subst X: /d"
+
+      - name: Stage artifacts
+        run: |
+          set -euo pipefail
+          mkdir dist
+          ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
+          cp "out/bin/josh-proxy$ext" "dist/josh-proxy-${{ inputs.tag }}-${{ matrix.target }}$ext"
+          for b in josh josh-filter; do
+            if [ -f "out/bin/$b$ext" ]; then
+              cp "out/bin/$b$ext" "dist/$b-${{ inputs.tag }}-${{ matrix.target }}$ext"
+            fi
+          done
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          src_sha=$(gh api "repos/${{ inputs.source }}/git/ref/tags/${{ inputs.tag }}" --jq .object.sha || echo unknown)
+          gh release create "${{ inputs.tag }}" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "${{ inputs.tag }}" \
+            --notes "Built from \`${{ inputs.source }}\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`), unmodified. Each binary passed the functional round-trip suite on its platform (see the run for this release); windows-x64 is experimental and may be absent. Verify: \`gh attestation verify <file> --repo ${{ github.repository }}\` and \`sha256sum -c SHA256SUMS\`."
