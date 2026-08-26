@@ -27,18 +27,28 @@ not the bar; "round-trips history correctly on this OS" is.
 | macos-arm64 | built + tested | built + tested |
 | macos-x64 | built + tested | built + tested |
 | windows-x64 | built + tested (patched builds) | built + tested (patched builds) |
+| windows-arm64 | built + tested (patched builds) | built + tested (patched builds) |
 
-**Windows works — from the patched builds only.** Upstream josh does not compile
-on Windows at `r26.07.19` ([josh#2235](https://github.com/josh-project/josh/issues/2235);
+**Windows works — from the patched builds only.** Upstream josh still does not
+compile on Windows through `r26.07.28` ([josh#2235](https://github.com/josh-project/josh/issues/2235);
 the maintainers note they have no infrastructure to test the platform), so
 releases built from unmodified upstream carry no Windows assets. Releases
 tagged `<tag>-win.N` are built from the
 [rigsmith/josh](https://github.com/rigsmith/josh) fork's Windows port branch,
 and their Windows binaries pass both suites plus the path-forms regression for
 [josh#2288](https://github.com/josh-project/josh/issues/2288) — which the port
-also fixes. The port is validated on x86-64 in CI and on ARM64 by hand; the
-intent is to upstream it, after which plain tags build everywhere and the
-`-win.N` line retires.
+also fixes.
+
+The port is now open upstream as
+[josh#2512](https://github.com/josh-project/josh/pull/2512). Review feedback is
+addressed, and the PR carries its own Windows CI job, green on both x86-64 and
+arm64 — so the port is no longer validated on arm64 by hand only. If it lands,
+plain tags build everywhere and the `-win.N` line retires.
+
+The two lines are currently at different tags. The newest upstream tag,
+`r26.07.28`, is released here with Linux and macOS assets only; the newest
+release carrying Windows binaries is `r26.07.19-win.3`. No `-win` build of
+`r26.07.28` has been cut yet.
 
 Windows legs run `continue-on-error` on their individual steps (job-level would
 render a failed leg as a green check —
@@ -58,7 +68,7 @@ never blocks a release, and the job summary states the real per-step verdict.
    `josh-proxy-<tag>-<target>[.exe]`, a `SHA256SUMS` file, and GitHub
    build-provenance attestations (`gh attestation verify <file> --repo rigsmith/josh-binaries`).
 
-Releases mirror upstream tag names (e.g. `r26.07.19`). Consumers should pin an
+Releases mirror upstream tag names (e.g. `r26.07.28`). Consumers should pin an
 exact tag **and** its sha256 on their own side — rig does — rather than
 trusting "latest".
 
@@ -71,10 +81,15 @@ a local `cargo install` only when no artifact exists for the platform.
 
 ## Relationship to upstream
 
-Binaries are built from **unmodified upstream source** at the stated tag (the
-release notes record the upstream commit SHA); upstream's license applies to
-them. The intent is to upstream this workflow — a project whose maintainers
-want platform coverage but lack the infrastructure gets a working, tested
-release pipeline to adopt; this repo keeps running as the proving ground and
-fallback either way. Patched builds, if ever published, will be clearly marked
-with their `rigsmith/josh` source tag.
+Binaries on the plain tag line are built from **unmodified upstream source** at
+the stated tag (the release notes record the upstream commit SHA); upstream's
+license applies to them. The intent is to upstream this workflow — a project
+whose maintainers want platform coverage but lack the infrastructure gets a
+working, tested release pipeline to adopt; this repo keeps running as the
+proving ground and fallback either way.
+
+Patched builds are published, on their own `<tag>-win.N` line, and are built
+from the [rigsmith/josh](https://github.com/rigsmith/josh) Windows port branch
+rather than from upstream source — `r26.07.19-win.1` through `-win.3` so far.
+The port branch itself is upstream as
+[josh#2512](https://github.com/josh-project/josh/pull/2512).
