@@ -7,10 +7,19 @@ on:
         description: "josh tag to build (e.g. r26.07.19)"
         required: true
         type: string
+      patch_ref:
+        description: "branch in rigsmith/josh carrying the Windows port"
+        required: false
+        default: "windows-master"
+        type: string
   workflow_call:
     inputs:
       tag:
         required: true
+        type: string
+      patch_ref:
+        required: false
+        default: "windows-master"
         type: string
 
 permissions:
@@ -37,7 +46,7 @@ jobs:
       - id: decide
         run: |
           set -euo pipefail
-          status="$(ALLOW_UNPATCHED=1 scripts/prepare-source.sh '${{ inputs.tag }}' /tmp/src)"
+          status="$(ALLOW_UNPATCHED=1 scripts/prepare-source.sh '${{ inputs.tag }}' /tmp/src https://github.com/rigsmith/josh '${{ inputs.patch_ref }}')"
           echo "patched=$status" >> "$GITHUB_OUTPUT"
           if [ "$status" != patched ]; then
             # Either the port is upstream already, or it does not apply to this
@@ -80,7 +89,8 @@ jobs:
           # failed job with job-level continue-on-error renders a green check
           # (actions/runner#2347), hiding exactly the signal this leg exists
           # to produce. The verdict step below states the real outcomes.
-          - { target: windows-x64, os: windows-latest,   experimental: true }
+          - { target: windows-x64,   os: windows-latest,  experimental: true }
+          - { target: windows-arm64, os: windows-11-arm,   experimental: true }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -92,8 +102,26 @@ jobs:
         with:
           go-version: stable
 
+      # aws-lc-sys' ARM assembly is GNU-syntax, which MSVC cannot assemble: the
+      # build then fails late in lib.exe, archiving objects never written.
+      - name: Use clang-cl for C dependencies
+        if: matrix.target == 'windows-arm64'
+        shell: pwsh
+        run: |
+          $clang = Get-Command clang-cl -ErrorAction SilentlyContinue
+          if ($clang) {
+            Write-Host "clang-cl: $($clang.Source)"
+          } else {
+            Write-Host "::warning::the runner image no longer ships clang-cl; installing LLVM"
+            choco install llvm -y --no-progress
+            Add-Content $env:GITHUB_PATH "$env:ProgramFiles\LLVM\bin"
+          }
+          # cc-rs splits these on whitespace, so the bare name has to resolve on PATH.
+          Add-Content $env:GITHUB_ENV "CC=clang-cl"
+          Add-Content $env:GITHUB_ENV "CXX=clang-cl"
+
       - name: Prepare source
-        run: ALLOW_UNPATCHED=1 scripts/prepare-source.sh "${{ inputs.tag }}" src
+        run: ALLOW_UNPATCHED=1 scripts/prepare-source.sh "${{ inputs.tag }}" src https://github.com/rigsmith/josh "${{ inputs.patch_ref }}"
 
       - name: Build josh-proxy
         id: proxy
@@ -196,7 +224,8 @@ jobs:
           - { target: linux-arm64, os: ubuntu-24.04-arm, experimental: false }
           - { target: macos-arm64, os: macos-latest,     experimental: false }
           - { target: macos-x64,   os: macos-15-intel,   experimental: false }
-          - { target: windows-x64, os: windows-latest,   experimental: true }
+          - { target: windows-x64,   os: windows-latest,  experimental: true }
+          - { target: windows-arm64, os: windows-11-arm,   experimental: true }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -272,8 +301,8 @@ jobs:
           elif [ "${{ needs.prepare.outputs.patched }}" = unpatched ]; then
             notes="Built from unmodified \`josh-project/josh\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`). No Windows binaries: the Windows port is written against master and does not apply to this tag."
           else
-            port_sha=$(gh api "repos/rigsmith/josh/commits/windows-master" --jq .sha || echo unknown)
-            notes="Built from \`josh-project/josh\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`) with the Windows port from \`rigsmith/josh\` \`windows-master\` (commit \`$port_sha\`) applied. That port is proposed upstream as josh-project/josh#2512; once it lands, tags build unmodified and this suffix retires."
+            port_sha=$(gh api "repos/rigsmith/josh/commits/${{ inputs.patch_ref }}" --jq .sha || echo unknown)
+            notes="Built from \`josh-project/josh\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`) with the Windows port from \`rigsmith/josh\` \`${{ inputs.patch_ref }}\` (commit \`$port_sha\`) applied. That port is proposed upstream as josh-project/josh#2512; once it lands, tags build unmodified and this suffix retires."
           fi
           gh release create "$tag" dist/* \
             --repo "${{ github.repository }}" \
