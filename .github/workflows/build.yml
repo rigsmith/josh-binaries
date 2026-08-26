@@ -7,19 +7,10 @@ on:
         description: "josh tag to build (e.g. r26.07.19)"
         required: true
         type: string
-      source:
-        description: "source repo (upstream, or rigsmith/josh for patched builds)"
-        required: false
-        default: "josh-project/josh"
-        type: string
   workflow_call:
     inputs:
       tag:
         required: true
-        type: string
-      source:
-        required: false
-        default: "josh-project/josh"
         type: string
 
 permissions:
@@ -32,7 +23,49 @@ env:
   AWS_LC_SYS_PREBUILT_NASM: 1
 
 jobs:
+  # Decide once whether this tag needs the Windows port, so every leg builds the
+  # same tree and the release has one name.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      patched: ${{ steps.decide.outputs.patched }}
+      release_tag: ${{ steps.decide.outputs.release_tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: decide
+        run: |
+          set -euo pipefail
+          status="$(ALLOW_UNPATCHED=1 scripts/prepare-source.sh '${{ inputs.tag }}' /tmp/src)"
+          echo "patched=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" != patched ]; then
+            # Either the port is upstream already, or it does not apply to this
+            # tag: both mean unmodified source, so the plain tag names it.
+            echo "release_tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            # Patched builds get their own tag, so a plain tag never names a
+            # release built from modified source. Pick the next free -win.N.
+            n=1
+            while gh release view "${{ inputs.tag }}-win.$n" --repo "${{ github.repository }}" >/dev/null 2>&1; do
+              n=$((n + 1))
+            done
+            echo "release_tag=${{ inputs.tag }}-win.$n" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Report
+        run: |
+          {
+            echo "tag: \`${{ inputs.tag }}\`"
+            echo "release: \`${{ steps.decide.outputs.release_tag }}\`"
+            case "${{ steps.decide.outputs.patched }}" in
+              patched)   echo "windows: port applied on top of the tag" ;;
+              clean)     echo "windows: port is upstream in this tag" ;;
+              unpatched) echo "⚠️ windows: the port does not apply to this tag (it is written against master), so this release carries no Windows binaries. Forward-port rigsmith/josh windows-master onto \`${{ inputs.tag }}\` if they are wanted." ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -59,23 +92,18 @@ jobs:
         with:
           go-version: stable
 
+      - name: Prepare source
+        run: ALLOW_UNPATCHED=1 scripts/prepare-source.sh "${{ inputs.tag }}" src
+
       - name: Build josh-proxy
         id: proxy
         continue-on-error: ${{ matrix.experimental }}
-        run: >
-          cargo install --locked
-          --git "https://github.com/${{ inputs.source }}"
-          --tag "${{ inputs.tag }}"
-          --root out josh-proxy
+        run: cargo install --locked --path src/josh-proxy --root out
 
-      - name: Build josh-cli (canary for josh#2235 on windows)
+      - name: Build josh-cli
         id: cli
         continue-on-error: ${{ matrix.experimental }}
-        run: >
-          cargo install --locked
-          --git "https://github.com/${{ inputs.source }}"
-          --tag "${{ inputs.tag }}"
-          --root out josh-cli
+        run: cargo install --locked --path src/josh-cli --root out
 
       - name: Round-trip suite
         id: roundtrip
@@ -108,10 +136,10 @@ jobs:
           set -euo pipefail
           mkdir dist
           ext=""; [ "${{ runner.os }}" = "Windows" ] && ext=".exe"
-          cp "out/bin/josh-proxy$ext" "dist/josh-proxy-${{ inputs.tag }}-${{ matrix.target }}$ext"
+          cp "out/bin/josh-proxy$ext" "dist/josh-proxy-${{ needs.prepare.outputs.release_tag }}-${{ matrix.target }}$ext"
           for b in josh josh-filter; do
             if [ -f "out/bin/$b$ext" ] && [ "${{ steps.clisuite.outcome }}" = "success" ]; then
-              cp "out/bin/$b$ext" "dist/$b-${{ inputs.tag }}-${{ matrix.target }}$ext"
+              cp "out/bin/$b$ext" "dist/$b-${{ needs.prepare.outputs.release_tag }}-${{ matrix.target }}$ext"
             fi
           done
           ls -l dist
@@ -212,7 +240,7 @@ jobs:
           fi
 
   release:
-    needs: [build, validate]
+    needs: [prepare, build, validate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -237,8 +265,17 @@ jobs:
       - name: Publish release
         run: |
           set -euo pipefail
-          src_sha=$(gh api "repos/${{ inputs.source }}/git/ref/tags/${{ inputs.tag }}" --jq .object.sha || echo unknown)
-          gh release create "${{ inputs.tag }}" dist/* \
+          tag="${{ needs.prepare.outputs.release_tag }}"
+          src_sha=$(gh api "repos/josh-project/josh/git/ref/tags/${{ inputs.tag }}" --jq .object.sha || echo unknown)
+          if [ "${{ needs.prepare.outputs.patched }}" = clean ]; then
+            notes="Built from unmodified \`josh-project/josh\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`)."
+          elif [ "${{ needs.prepare.outputs.patched }}" = unpatched ]; then
+            notes="Built from unmodified \`josh-project/josh\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`). No Windows binaries: the Windows port is written against master and does not apply to this tag."
+          else
+            port_sha=$(gh api "repos/rigsmith/josh/commits/windows-master" --jq .sha || echo unknown)
+            notes="Built from \`josh-project/josh\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`) with the Windows port from \`rigsmith/josh\` \`windows-master\` (commit \`$port_sha\`) applied. That port is proposed upstream as josh-project/josh#2512; once it lands, tags build unmodified and this suffix retires."
+          fi
+          gh release create "$tag" dist/* \
             --repo "${{ github.repository }}" \
-            --title "${{ inputs.tag }}" \
-            --notes "Built from \`${{ inputs.source }}\` tag \`${{ inputs.tag }}\` (commit \`$src_sha\`), unmodified. Each binary passed the functional round-trip suite on its platform — once at build and again as a re-downloaded artifact (see the run for this release); windows-x64 is experimental and may be absent. Verify: \`gh attestation verify <file> --repo ${{ github.repository }}\` and \`sha256sum -c SHA256SUMS\`."
+            --title "$tag" \
+            --notes "$notes Each binary passed the functional suites on its platform. Verify: \`gh attestation verify <file> --repo ${{ github.repository }}\` and \`sha256sum -c SHA256SUMS\`."

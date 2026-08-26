@@ -26,7 +26,9 @@ jobs:
           have=$(gh release list --repo "${{ github.repository }}" \
             --json tagName --jq '.[].tagName' || true)
           for t in $upstream; do
-            if echo "$have" | grep -qx "$t"; then
+            # A tag is covered by either an unmodified release or a patched
+            # <tag>-win.N one, so match both and never rebuild what exists.
+            if echo "$have" | grep -qE "^${t}(-win\.[0-9]+)?$"; then
               echo "already released: $t"
             else
               echo "dispatching build for $t"
