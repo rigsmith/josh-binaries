@@ -23,6 +23,9 @@ UPSTREAM="${UPSTREAM_REPO:-https://github.com/josh-project/josh}"
 git clone -q "$UPSTREAM" "$DEST"
 cd "$DEST"
 git checkout -q "$TAG"
+# Pin where we started: when TAG names a branch the checkout is not detached,
+# so the ref moves with the cherry-pick and cannot be compared against.
+START="$(git rev-parse HEAD)"
 
 # Identity is required for cherry-pick; these commits never leave the runner.
 git config user.email "ci@rigsmith.dev"
@@ -31,8 +34,15 @@ git config user.name "josh-binaries CI"
 git remote add winport "$PATCH_REPO"
 git fetch -q winport "$PATCH_REF"
 
-if git cherry-pick --allow-empty --keep-redundant-commits FETCH_HEAD >/dev/null 2>&1; then
-  if git diff --quiet HEAD~1 HEAD; then
+# Apply everything the port branch adds, not just its tip: a branch may carry
+# several commits, and picking only the last one silently applies a fraction of
+# the port. The range is what the branch has that upstream does not.
+base="$(git merge-base "$START" FETCH_HEAD)"
+
+if git cherry-pick --allow-empty --keep-redundant-commits "$base..FETCH_HEAD" >/dev/null 2>&1; then
+  # Comparing against the tag rather than the previous commit: with a range,
+  # "changed nothing" is a property of the result, not of the last pick.
+  if git diff --quiet "$START" HEAD; then
     echo clean
   else
     echo patched
